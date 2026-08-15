@@ -95,6 +95,13 @@ rm -f "${MNT}/etc/systemd/system/etc-pacman.d-gnupg.mount"
 sed -i '/^Hidden=true/d' "${MNT}/usr/share/applications/gparted.desktop" &>/dev/null
 sed -i 's/^%wheel ALL=(ALL:ALL) NOPASSWD: ALL/# %wheel ALL=(ALL:ALL) NOPASSWD: ALL/' "${MNT}/etc/sudoers"
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL$/%wheel ALL=(ALL:ALL) ALL/' "${MNT}/etc/sudoers"
+if grep -q '^%wheel ALL=(ALL:ALL) NOPASSWD: ALL' "${MNT}/etc/sudoers"; then
+  emit_error "sudoers_hardening_failed" "Failed to disable passwordless wheel sudo"
+  emit_result "error" "$STEP"
+  exit 1
+fi
+run_or_die "$STEP" "sudoers_invalid" "sudoers file failed validation after hardening" \
+  arch-chroot "$MNT" visudo -c -f /etc/sudoers
 
 emit_progress 90 "Configuring mkinitcpio hooks"
 MKINITCPIO_HOOKS="base systemd autodetect microcode modconf kms keyboard keymap sd-vconsole block filesystems fsck"
