@@ -106,7 +106,7 @@ Item {
                     var m;
                     fieldRe.lastIndex = 0;
                     while ((m = fieldRe.exec(line)) !== null) {
-                        fields[m[1]] = m[2].replace(/\\(.)/g, "$1");
+                        fields[m[1]] = m[2].replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
                     }
                     if (fields.TYPE !== "disk") continue;
                     if (!fields.PATH || !/^\/dev\/(sd|hd|vd|nvme|mmcblk)/.test(fields.PATH)) continue;

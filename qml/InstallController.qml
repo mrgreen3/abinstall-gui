@@ -86,8 +86,10 @@ QtObject {
         if (s === "''") return "";
         if (s.length >= 3 && s.slice(0, 2) === "$'" && s.slice(-1) === "'") {
             var inner = s.slice(2, -1);
-            return inner.replace(/\\(.)/g, (_, c) => {
-                switch (c) {
+            return inner.replace(/\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|.)/g, (_, esc) => {
+                if (esc[0] === "x") return String.fromCharCode(parseInt(esc.slice(1), 16));
+                if (/^[0-7]+$/.test(esc)) return String.fromCharCode(parseInt(esc, 8));
+                switch (esc) {
                     case "n": return "\n";
                     case "t": return "\t";
                     case "r": return "\r";
@@ -95,7 +97,7 @@ QtObject {
                     case "b": return "\b";
                     case "f": return "\f";
                     case "v": return "\v";
-                    default: return c;
+                    default: return esc;
                 }
             });
         }
