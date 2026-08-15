@@ -5,7 +5,7 @@
 # configure_mkinitcpio(), plus the tail end creates the user account staged
 # by step-02-user (see that script's ordering note) using arch_chroot,
 # now that /mnt actually has a target rootfs with useradd/passwd in it.
-set -u
+set -u -o pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
 
@@ -92,7 +92,6 @@ fi
 unlink "${MNT}/etc/systemd/system/multi-user.target.wants/pacman-init.service" &>/dev/null
 rm -f "${MNT}/etc/systemd/system/pacman-init.service"
 rm -f "${MNT}/etc/systemd/system/etc-pacman.d-gnupg.mount"
-rm -r "${MNT}/etc/skel" &>/dev/null
 sed -i '/^Hidden=true/d' "${MNT}/usr/share/applications/gparted.desktop" &>/dev/null
 sed -i 's/^%wheel ALL=(ALL:ALL) NOPASSWD: ALL/# %wheel ALL=(ALL:ALL) NOPASSWD: ALL/' "${MNT}/etc/sudoers"
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL$/%wheel ALL=(ALL:ALL) ALL/' "${MNT}/etc/sudoers"
@@ -115,8 +114,13 @@ if [[ -z "$username" || -z "$password_hash" ]]; then
 fi
 run_or_die "$STEP" "useradd_failed" "Failed to create user ${username}" \
   arch-chroot "$MNT" useradd -m -G wheel,audio,video,storage,input -s /bin/bash "$username"
-arch-chroot "$MNT" usermod -p "$password_hash" "$username"
+run_or_die "$STEP" "usermod_failed" "Failed to set password for ${username}" \
+  arch-chroot "$MNT" usermod -p "$password_hash" "$username"
 state_set USERNAME_CREATED "1"
+
+# /etc/skel is only cleaned up now — useradd -m above needs it present to
+# populate the new user's home directory with default dotfiles.
+rm -r "${MNT}/etc/skel" &>/dev/null
 
 emit_progress 100 "System files copied and configured"
 emit_result success "$STEP"

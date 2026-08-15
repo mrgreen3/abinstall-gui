@@ -78,8 +78,28 @@ QtObject {
     }
 
     // Unquotes the printf %q-style output emitted by common.sh's emit_* helpers.
+    // bash's %q has three output shapes: an empty string prints as the two
+    // literal characters '', a "plain" string is backslash-escaped in place
+    // with no surrounding quotes, and a string needing ANSI-C escapes (e.g.
+    // control characters) is wrapped as $'...'.
     function _unquote(s) {
-        return s.replace(/^"|"$/g, "").replace(/\\(.)/g, "$1");
+        if (s === "''") return "";
+        if (s.length >= 3 && s.slice(0, 2) === "$'" && s.slice(-1) === "'") {
+            var inner = s.slice(2, -1);
+            return inner.replace(/\\(.)/g, (_, c) => {
+                switch (c) {
+                    case "n": return "\n";
+                    case "t": return "\t";
+                    case "r": return "\r";
+                    case "a": return "\x07";
+                    case "b": return "\b";
+                    case "f": return "\f";
+                    case "v": return "\v";
+                    default: return c;
+                }
+            });
+        }
+        return s.replace(/\\(.)/g, "$1");
     }
 
     function _parseLine(step, line) {

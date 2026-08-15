@@ -87,24 +87,31 @@ Item {
     }
 
     Process {
-        command: ["lsblk", "-d", "-b", "-n", "-o", "PATH,SIZE,MODEL,TYPE"]
+        // -P (key="value" pairs) rather than plain columns: a disk with an
+        // empty MODEL (common on virtio/cloud disks like /dev/vda, or
+        // generic USB/SD readers) collapses whitespace-split columns to
+        // fewer fields and would otherwise silently drop the device.
+        command: ["lsblk", "-d", "-b", "-n", "-P", "-o", "PATH,SIZE,MODEL,TYPE"]
         running: true
 
         stdout: StdioCollector {
             onStreamFinished: {
                 var list = [];
                 var lines = text.split("\n");
+                var fieldRe = /(\w+)="((?:[^"\\]|\\.)*)"/g;
                 for (var i = 0; i < lines.length; i++) {
                     var line = lines[i].trim();
                     if (line.length === 0) continue;
-                    var parts = line.split(/\s+/);
-                    if (parts.length < 4) continue;
-                    var path = parts[0], sizeBytes = parts[1], type = parts[parts.length - 1];
-                    var model = parts.slice(2, parts.length - 1).join(" ");
-                    if (type !== "disk") continue;
-                    if (!/^\/dev\/(sd|hd|vd|nvme|mmcblk)/.test(path)) continue;
-                    var gib = (parseInt(sizeBytes, 10) / (1024 * 1024 * 1024)).toFixed(1);
-                    list.push({path: path, size: gib + " GiB", model: model || "Unknown"});
+                    var fields = {};
+                    var m;
+                    fieldRe.lastIndex = 0;
+                    while ((m = fieldRe.exec(line)) !== null) {
+                        fields[m[1]] = m[2].replace(/\\(.)/g, "$1");
+                    }
+                    if (fields.TYPE !== "disk") continue;
+                    if (!fields.PATH || !/^\/dev\/(sd|hd|vd|nvme|mmcblk)/.test(fields.PATH)) continue;
+                    var gib = (parseInt(fields.SIZE || "0", 10) / (1024 * 1024 * 1024)).toFixed(1);
+                    list.push({path: fields.PATH, size: gib + " GiB", model: fields.MODEL || "Unknown"});
                 }
                 root.devices = list;
             }

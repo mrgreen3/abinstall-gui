@@ -79,9 +79,10 @@ udevadm settle 2>/dev/null || sleep 2
 
 emit_progress 45 "Checking TRIM support"
 TRIM=0
-for f in /sys/block/*/queue/discard_granularity; do
-  [[ -f "$f" && "$(cat "$f" 2>/dev/null)" -gt 0 ]] && { TRIM=1; break; }
-done
+discard_file="/sys/block/$(basename "$device")/queue/discard_granularity"
+if [[ -f "$discard_file" && "$(cat "$discard_file" 2>/dev/null)" -gt 0 ]]; then
+  TRIM=1
+fi
 
 if [[ -n "${EFI_PART:-}" ]]; then
   emit_progress 55 "Formatting EFI partition"

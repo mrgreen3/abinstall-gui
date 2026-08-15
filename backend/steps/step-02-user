@@ -37,7 +37,7 @@ if [[ -z "$password" ]]; then
 fi
 
 emit_progress 70 "Hashing password"
-password_hash=$(openssl passwd -6 "$password")
+password_hash=$(printf '%s' "$password" | openssl passwd -6 -stdin)
 if [[ -z "$password_hash" ]]; then
   emit_error "hash_failed" "Failed to hash password."
   emit_result "error" "$STEP"
