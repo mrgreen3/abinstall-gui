@@ -117,7 +117,13 @@ QtObject {
         _setMessage(step, "Starting...");
         stepLog[step] = "";
 
-        var args = [runnerPath, stepNames[step]];
+        // The Quickshell process itself runs as the unprivileged live user
+        // (mango session), not root — every step needs privileged disk/
+        // chroot access, so it's launched via passwordless wheel sudo
+        // (already configured on the live ISO). -n means "fail fast" if
+        // that's ever not the case, instead of sudo silently blocking on a
+        // password prompt that has nowhere to be typed into.
+        var args = ["sudo", "-n", runnerPath, stepNames[step]];
         var stdinData = null;
 
         if (step === stepPartition) {
