@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# step-01-partition <device>
+#
+# Ported from abinstall's auto_partition_disk(). GPT, EFI+swap+root, swap
+# sized off RAM (2xRAM <=2GiB, 1xRAM <=8GiB, no swap partition >8GiB),
+# root takes remaining space. Confirmation ("this erases the disk") is the
+# GUI's job — this script partitions unconditionally once invoked.
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/common.sh"
+
+STEP="partition"
+require_root "$STEP"
+
+device="${1:-}"
+if [[ -z "$device" || ! -b "$device" ]]; then
+  emit_error "bad_device" "No valid block device given: '${device}'"
+  emit_result "error" "$STEP"
+  exit 1
+fi
+
+UEFI=$(detect_uefi)
+suffix=$(partition_suffix "$device")
+
+emit_progress 5 "Checking existing mounts and swap"
+mounted_partitions=$(lsblk -nrpo NAME,MOUNTPOINT | awk -v d="$device" '$1 ~ d {print $1}')
+swapoff -a &>/dev/null
+for p in $mounted_partitions; do umount "$p" &>/dev/null; done
+
+# swap size from total RAM
+mem_kib=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+mem_gib=$(( (mem_kib + 1048575) / 1048576 ))
+if   [[ $mem_gib -le 2 ]]; then swap_gib=$(( mem_gib * 2 ))
+elif [[ $mem_gib -le 8 ]]; then swap_gib=$mem_gib
+else                            swap_gib=0
+fi
+
+emit_progress 10 "Wiping ${device}"
+run_or_die "$STEP" "wipefs_failed" "Failed to wipe ${device}" wipefs -af "$device"
+
+emit_progress 20 "Creating partition table"
+if [[ $UEFI -eq 1 ]]; then
+  EFI_PART="${device}${suffix}1"
+  if [[ $swap_gib -gt 0 ]]; then
+    SWAP_PART="${device}${suffix}2"
+    ROOT_PART="${device}${suffix}3"
+    run_or_die "$STEP" "parted_failed" "parted failed to create GPT layout" \
+      parted -s "$device" mklabel gpt \
+        mkpart primary fat32 1MiB 513MiB set 1 esp on \
+        mkpart primary linux-swap 513MiB "$(( 513 + swap_gib * 1024 ))MiB" \
+        mkpart primary ext4 "$(( 513 + swap_gib * 1024 ))MiB" 100%
+  else
+    SWAP_PART=""
+    ROOT_PART="${device}${suffix}2"
+    run_or_die "$STEP" "parted_failed" "parted failed to create GPT layout" \
+      parted -s "$device" mklabel gpt \
+        mkpart primary fat32 1MiB 513MiB set 1 esp on \
+        mkpart primary ext4 513MiB 100%
+  fi
+else
+  EFI_PART=""
+  if [[ $swap_gib -gt 0 ]]; then
+    SWAP_PART="${device}${suffix}1"
+    ROOT_PART="${device}${suffix}2"
+    run_or_die "$STEP" "parted_failed" "parted failed to create MBR layout" \
+      parted -s "$device" mklabel msdos \
+        mkpart primary linux-swap 1MiB "$(( 1 + swap_gib * 1024 ))MiB" \
+        mkpart primary ext4 "$(( 1 + swap_gib * 1024 ))MiB" 100%
+  else
+    SWAP_PART=""
+    ROOT_PART="${device}${suffix}1"
+    run_or_die "$STEP" "parted_failed" "parted failed to create MBR layout" \
+      parted -s "$device" mklabel msdos mkpart primary ext4 1MiB 100%
+  fi
+fi
+
+partprobe "$device" &>/dev/null
+udevadm settle 2>/dev/null || sleep 2
+
+emit_progress 45 "Checking TRIM support"
+TRIM=0
+for f in /sys/block/*/queue/discard_granularity; do
+  [[ -f "$f" && "$(cat "$f" 2>/dev/null)" -gt 0 ]] && { TRIM=1; break; }
+done
+
+if [[ -n "${EFI_PART:-}" ]]; then
+  emit_progress 55 "Formatting EFI partition"
+  run_or_die "$STEP" "mkfs_efi_failed" "Failed to format EFI partition ${EFI_PART}" \
+    mkfs.vfat -F32 "$EFI_PART"
+fi
+
+if [[ -n "${SWAP_PART:-}" ]]; then
+  emit_progress 65 "Formatting swap partition"
+  run_or_die "$STEP" "mkswap_failed" "Failed to format swap partition ${SWAP_PART}" \
+    mkswap "$SWAP_PART"
+fi
+
+emit_progress 75 "Formatting root partition (ext4)"
+mkfs_args=(-F)
+[[ $TRIM -eq 1 ]] && mkfs_args+=(-E discard)
+run_or_die "$STEP" "mkfs_root_failed" "Failed to format root partition ${ROOT_PART}" \
+  mkfs.ext4 "${mkfs_args[@]}" "$ROOT_PART"
+
+emit_progress 85 "Mounting target filesystems"
+run_or_die "$STEP" "mount_root_failed" "Failed to mount root partition at ${MNT}" \
+  mount "$ROOT_PART" "$MNT"
+
+if [[ -n "${EFI_PART:-}" ]]; then
+  mkdir -p "${MNT}/boot"
+  run_or_die "$STEP" "mount_efi_failed" "Failed to mount EFI partition at ${MNT}/boot" \
+    mount "$EFI_PART" "${MNT}/boot"
+fi
+
+if [[ -n "${SWAP_PART:-}" ]]; then
+  swapon "$SWAP_PART" || emit_progress 90 "Warning: swapon failed (non-fatal)"
+fi
+
+# Persist decisions for step-03 (fstab) and step-04 (bootloader).
+state_set DEVICE "$device"
+state_set UEFI "$UEFI"
+state_set ROOT_PART "$ROOT_PART"
+state_set EFI_PART "${EFI_PART:-}"
+state_set SWAP_PART "${SWAP_PART:-}"
+state_set TRIM "$TRIM"
+
+emit_progress 100 "Partitioning of ${device} complete"
+emit_result success "$STEP"

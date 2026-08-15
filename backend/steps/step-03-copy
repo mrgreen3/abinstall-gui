@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# step-03-copy
+#
+# Ported from abinstall's install_archbang() + configure_fstab() +
+# configure_mkinitcpio(), plus the tail end creates the user account staged
+# by step-02-user (see that script's ordering note) using arch_chroot,
+# now that /mnt actually has a target rootfs with useradd/passwd in it.
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/common.sh"
+
+STEP="copy"
+require_root "$STEP"
+state_load_all
+
+if [[ ! -d /run/archiso/airootfs ]]; then
+  emit_error "not_archiso" "Not running from the ArchBang live environment."
+  emit_result "error" "$STEP"
+  exit 1
+fi
+
+if [[ ! -d "$MNT" ]] || ! mountpoint -q "$MNT"; then
+  emit_error "no_target" "${MNT} is not mounted — run the partition step first."
+  emit_result "error" "$STEP"
+  exit 1
+fi
+
+emit_progress 2 "Preparing copy"
+SRC_DIR="/run/archiso/airootfs/"
+TOTAL_SIZE=$(du -sb "$SRC_DIR" | awk '{print $1}')
+
+emit_progress 5 "Copying system files (this takes a while)"
+copy_ok=0
+if command -v pv &>/dev/null; then
+  progress_fifo="${STATE_DIR}/copy-progress.$$"
+  mkfifo "$progress_fifo"
+
+  ( tar cf - -C "$SRC_DIR" . | pv -n -s "$TOTAL_SIZE" 2>"$progress_fifo" | tar xpf - -C "$MNT" ) &
+  copy_pid=$!
+
+  while IFS= read -r pct; do
+    [[ "$pct" =~ ^[0-9]+$ ]] || continue
+    scaled=$(( 5 + pct * 70 / 100 ))
+    emit_progress "$scaled" "Copying system files (${pct}%)"
+  done < "$progress_fifo"
+
+  wait "$copy_pid" && copy_ok=1
+  rm -f "$progress_fifo"
+else
+  tar cf - -C "$SRC_DIR" . | tar xpf - -C "$MNT" && copy_ok=1
+fi
+
+if [[ $copy_ok -ne 1 ]]; then
+  emit_error "copy_failed" "Failed to copy system files to ${MNT}"
+  emit_result "error" "$STEP"
+  exit 1
+fi
+
+# Sync changes made during the live session (persistent overlay upperdir).
+UPPERDIR=$(find /run/archiso/cowspace -type d -path "*/persistent_*/x86_64/upperdir" 2>/dev/null | head -1)
+if [[ -n "$UPPERDIR" && -d "$UPPERDIR" ]]; then
+  emit_progress 76 "Syncing live session changes"
+  rsync -av "$UPPERDIR/" "${MNT}/" >/dev/null 2>&1 || true
+fi
+
+emit_progress 80 "Writing fstab"
+genfstab -U "$MNT" > "${MNT}/etc/fstab"
+
+emit_progress 83 "Generating machine ID"
+arch_chroot "systemd-machine-id-setup"
+
+emit_progress 85 "Cleaning up live-only artifacts"
+cat > "${MNT}/etc/mkinitcpio.d/linux.preset" <<'EOF'
+# SPDX-License-Identifier: GPL-3.0-or-later
+# mkinitcpio preset file for the 'linux' package
+
+PRESETS=('default' 'fallback')
+ALL_kver='/boot/vmlinuz-linux'
+ALL_config='/etc/mkinitcpio.conf'
+
+default_image="/boot/initramfs-linux.img"
+fallback_image="/boot/initramfs-linux-fallback.img"
+fallback_options="-S autodetect"
+EOF
+
+rm -r "${MNT}/etc/systemd/system/getty@tty1.service.d" &>/dev/null
+rm "${MNT}/etc/systemd/system/default.target" &>/dev/null
+if [[ -f "${MNT}/etc/systemd/journald.conf.d/volatile-storage.conf" ]]; then
+  sed -i 's/volatile/auto/g' "${MNT}/etc/systemd/journald.conf.d/volatile-storage.conf"
+  mv "${MNT}/etc/systemd/journald.conf.d/volatile-storage.conf" "${MNT}/etc/systemd/journald.conf.d/auto-storage.conf"
+fi
+unlink "${MNT}/etc/systemd/system/multi-user.target.wants/pacman-init.service" &>/dev/null
+rm -f "${MNT}/etc/systemd/system/pacman-init.service"
+rm -f "${MNT}/etc/systemd/system/etc-pacman.d-gnupg.mount"
+rm -r "${MNT}/etc/skel" &>/dev/null
+sed -i '/^Hidden=true/d' "${MNT}/usr/share/applications/gparted.desktop" &>/dev/null
+sed -i 's/^%wheel ALL=(ALL:ALL) NOPASSWD: ALL/# %wheel ALL=(ALL:ALL) NOPASSWD: ALL/' "${MNT}/etc/sudoers"
+sed -i 's/^# %wheel ALL=(ALL:ALL) ALL$/%wheel ALL=(ALL:ALL) ALL/' "${MNT}/etc/sudoers"
+
+emit_progress 90 "Configuring mkinitcpio hooks"
+MKINITCPIO_HOOKS="base systemd autodetect microcode modconf kms keyboard keymap sd-vconsole block filesystems fsck"
+arch_chroot "sed -i -E 's|^HOOKS=.*|HOOKS=(${MKINITCPIO_HOOKS})|' /etc/mkinitcpio.conf"
+arch_chroot "sed -i 's/^COMPRESSION=\"xz\"/#COMPRESSION=\"xz\"/' /etc/mkinitcpio.conf"
+arch_chroot "sed -i 's/^COMPRESSION_OPTIONS=/#COMPRESSION_OPTIONS=/' /etc/mkinitcpio.conf"
+run_or_die "$STEP" "mkinitcpio_failed" "mkinitcpio failed to build the initramfs" \
+  arch-chroot "$MNT" mkinitcpio -p linux
+
+emit_progress 95 "Creating user account"
+username="${USERNAME:-}"
+password_hash="${PASSWORD_HASH:-}"
+if [[ -z "$username" || -z "$password_hash" ]]; then
+  emit_error "no_staged_user" "No user credentials staged — run the user step first."
+  emit_result "error" "$STEP"
+  exit 1
+fi
+run_or_die "$STEP" "useradd_failed" "Failed to create user ${username}" \
+  arch-chroot "$MNT" useradd -m -G wheel,audio,video,storage,input -s /bin/bash "$username"
+arch-chroot "$MNT" usermod -p "$password_hash" "$username"
+state_set USERNAME_CREATED "1"
+
+emit_progress 100 "System files copied and configured"
+emit_result success "$STEP"

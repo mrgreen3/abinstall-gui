@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# step-02-user <username>
+#
+# Reads the password from stdin (never argv, never emitted in the protocol
+# stream — argv is visible to every user via /proc, ps).
+#
+# NOTE ON ORDERING: useradd needs to run inside the target system's chroot,
+# which means it needs the target rootfs's own useradd/passwd binaries —
+# those only exist once step-03-copy has landed the airootfs at /mnt. So
+# this step only validates the username and hashes the password (openssl
+# runs fine from the live environment); the account itself is created by
+# step-03-copy immediately after it finishes copying, using the stored
+# hash. This keeps the GUI's 4-step order (user before copy) while the
+# privileged work happens in the order it actually has to.
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/common.sh"
+
+STEP="user"
+require_root "$STEP"
+
+username="${1:-}"
+
+emit_progress 10 "Validating username"
+if [[ -z "$username" ]] || ! [[ "$username" =~ ^[a-z_][a-z0-9_-]*\$?$ ]]; then
+  emit_error "bad_username" "Invalid username '${username}'. Use lowercase letters, digits, - or _; cannot start with a digit."
+  emit_result "error" "$STEP"
+  exit 1
+fi
+
+emit_progress 40 "Reading password"
+IFS= read -r password
+if [[ -z "$password" ]]; then
+  emit_error "empty_password" "Password cannot be empty."
+  emit_result "error" "$STEP"
+  exit 1
+fi
+
+emit_progress 70 "Hashing password"
+password_hash=$(openssl passwd -6 "$password")
+if [[ -z "$password_hash" ]]; then
+  emit_error "hash_failed" "Failed to hash password."
+  emit_result "error" "$STEP"
+  exit 1
+fi
+unset password
+
+state_set USERNAME "$username"
+state_set PASSWORD_HASH "$password_hash"
+
+emit_progress 100 "User credentials staged for ${username}"
+emit_result success "$STEP"

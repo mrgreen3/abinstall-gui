@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# abinstall-gui-runner <step> [args...]
+#
+# Single entry point Quickshell's Process{} launches (as root). Validates
+# the step name against a fixed allowlist and execs the matching script —
+# keeps the QML side to one command shape instead of four hardcoded paths,
+# and gives one place to reject anything unexpected.
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+step="${1:-}"
+shift || true
+
+case "$step" in
+  partition)  exec "${SCRIPT_DIR}/steps/step-01-partition" "$@" ;;
+  user)       exec "${SCRIPT_DIR}/steps/step-02-user" "$@" ;;
+  copy)       exec "${SCRIPT_DIR}/steps/step-03-copy" "$@" ;;
+  bootloader) exec "${SCRIPT_DIR}/steps/step-04-bootloader" "$@" ;;
+  *)
+    printf 'ERROR code=bad_step message="Unknown step: %s"\n' "$step"
+    printf 'RESULT status=error step=unknown\n'
+    exit 1
+    ;;
+esac

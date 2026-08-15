@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# step-04-bootloader
+#
+# Ported from abinstall's configure_bootloader(). No LUKS/LVM handling —
+# this GUI installer only offers the auto-partition layout from step-01,
+# which is always a plain root partition.
+set -u
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/common.sh"
+
+STEP="bootloader"
+require_root "$STEP"
+state_load_all
+
+if [[ ! -d "$MNT" ]] || ! mountpoint -q "$MNT"; then
+  emit_error "no_target" "${MNT} is not mounted — run the partition step first."
+  emit_result "error" "$STEP"
+  exit 1
+fi
+
+UEFI="${UEFI:-$(detect_uefi)}"
+ROOT_PART="${ROOT_PART:-}"
+DEVICE="${DEVICE:-}"
+
+emit_progress 5 "Detecting boot mode"
+if [[ -z "$ROOT_PART" || ! -b "$ROOT_PART" ]]; then
+  ROOT_PART=$(lsblk -no PATH,MOUNTPOINT | awk -v m="$MNT" '$2==m {print $1}')
+fi
+if [[ -z "$ROOT_PART" || ! -b "$ROOT_PART" ]]; then
+  emit_error "no_root_part" "Unable to determine root partition for GRUB."
+  emit_result "error" "$STEP"
+  exit 1
+fi
+
+emit_progress 15 "Installing grub package check"
+if ! arch-chroot "$MNT" command -v grub-install &>/dev/null; then
+  emit_error "grub_missing" "grub is not installed in the target system."
+  emit_result "error" "$STEP"
+  exit 1
+fi
+
+if [[ "$UEFI" -eq 1 ]]; then
+  if ! mountpoint -q "${MNT}/boot"; then
+    emit_error "no_efi_mount" "EFI partition is not mounted at ${MNT}/boot."
+    emit_result "error" "$STEP"
+    exit 1
+  fi
+  emit_progress 30 "Installing GRUB (UEFI)"
+  run_or_die "$STEP" "grub_install_failed" "grub-install failed (UEFI)" \
+    arch-chroot "$MNT" grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB --recheck
+else
+  BOOT_DEV="${DEVICE:-}"
+  if [[ -z "$BOOT_DEV" || ! -b "$BOOT_DEV" ]]; then
+    BOOT_DEV=$(lsblk -no pkname "$ROOT_PART" | awk '{print "/dev/"$1}')
+  fi
+  if [[ -z "$BOOT_DEV" || ! -b "$BOOT_DEV" ]]; then
+    emit_error "no_boot_dev" "Could not determine a valid boot device for BIOS GRUB install."
+    emit_result "error" "$STEP"
+    exit 1
+  fi
+  emit_progress 30 "Installing GRUB (BIOS) to ${BOOT_DEV}"
+  run_or_die "$STEP" "grub_install_failed" "grub-install failed (BIOS) on ${BOOT_DEV}" \
+    grub-install --target=i386-pc --boot-directory="${MNT}/boot" "$BOOT_DEV"
+fi
+
+emit_progress 60 "Building kernel command line"
+partuuid=$(blkid -s PARTUUID -o value "$ROOT_PART")
+if [[ -n "$partuuid" ]]; then
+  CMDLINE="root=PARTUUID=${partuuid} rw"
+else
+  uuid=$(blkid -s UUID -o value "$ROOT_PART")
+  CMDLINE="root=UUID=${uuid} rw"
+fi
+arch_chroot "sed -i.bak -E 's|^GRUB_CMDLINE_LINUX=.*|GRUB_CMDLINE_LINUX=\"${CMDLINE}\"|' /etc/default/grub"
+
+emit_progress 80 "Generating grub.cfg"
+run_or_die "$STEP" "grub_mkconfig_failed" "grub-mkconfig failed" \
+  arch-chroot "$MNT" grub-mkconfig -o /boot/grub/grub.cfg
+
+emit_progress 100 "Bootloader installed"
+emit_result success "$STEP"
